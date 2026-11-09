@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# Run a WAV through the real studiomic config, as the user service runs it.
+#
+#   pw-run CONF IN.wav OUT.wav
+#
+# CONF is the file built by modules/nixos/services/studiomic/chain.nix.
+# This starts that config as a PipeWire client of the running session, under a
+# throw-away node name and with priority.session 0, so the default microphone
+# does not change. The test streams are linked by hand and have no
+# autoconnect, so nothing reaches the speakers or reads a real microphone.
+# Everything it started is stopped on exit.
+#
+# VB_STAGES=N runs only the first N nodes of the graph, to see what each stage
+# adds (an ablation). Default: all of them.
+#
+# VB_LOG=FILE keeps the filter process log (DPDFNET_DEBUG=1 adds frame timing).
+#
+# IN.wav and OUT.wav are mono 48 kHz float. OUT.wav starts before the filter's
+# first sample, so it is longer than IN.wav; the bench removes the delay.
+set -euo pipefail
+
+conf=$1 in=$2 out=$3
+id=vb$$
+dir=$(mktemp -d "${TMPDIR:-/tmp}/pw-run.XXXXXX")
+pids=()
+cleanup() {
+  for p in "${pids[@]}"; do kill "$p" 2>/dev/null || true; done
+  wait 2>/dev/null || true
+  [ -z "${VB_LOG:-}" ] || cp "$dir/chain.log" "$VB_LOG" 2>/dev/null || true
+  rm -rf "$dir"
+}
+trap cleanup EXIT
+
+# unique node names, no default-source takeover, no autoconnect on the capture
+python3 -I - "$conf" "$dir/run.conf" "$id" "${VB_STAGES:-0}" <<'PY'
+import json, sys
+src, dst, nid, stages = sys.argv[1:5]
+c = json.load(open(src))
+for m in c["context.modules"]:
+    if m["name"] == "libpipewire-module-filter-chain":
+        a = m["args"]
+        n = int(stages)
+        if n:
+            g = a["filter.graph"]
+            g["nodes"], g["links"] = g["nodes"][:n], g["links"][: n - 1]
+            last = g["nodes"][-1]
+            g["outputs"] = [last["name"] + ":" + ("Out" if last["type"] == "builtin" else "Output")]
+        a["capture.props"]["node.name"] = nid + ".capture"
+        a["capture.props"]["node.autoconnect"] = False
+        a["playback.props"]["node.name"] = nid
+        a["playback.props"]["priority.session"] = 0
+json.dump(c, open(dst, "w"))
+PY
+
+pipewire -c "$dir/run.conf" >"$dir/chain.log" 2>&1 &
+pids+=($!)
+
+# Capture the listing first: with pipefail, grep -q or -m1 closing the pipe early
+# makes pw-link die of SIGPIPE and the pipeline report failure.
+ports() { pw-link "$1" 2>/dev/null || true; }
+port() { # port -i|-o PATTERN: first matching port name
+  local list
+  list=$(ports "$1")
+  grep -m1 -- "$2" <<<"$list" | sed 's/^ *//'
+}
+
+wait_port() { # wait_port -i|-o PATTERN
+  local list
+  for _ in $(seq 100); do
+    list=$(ports "$1")
+    grep -q -- "$2" <<<"$list" && return 0
+    sleep 0.1
+  done
+  echo "pw-run: port $2 did not appear" >&2
+  tail -5 "$dir/chain.log" >&2
+  return 1
+}
+wait_port -i "$id.capture:input"
+wait_port -o "$id:capture"
+
+# One second of silence in front: the recorder is linked a moment after the
+# player starts, so the first samples of the stream can be missed.
+python3 -I - "$in" "$dir/in.wav" <<'PY'
+import sys
+import numpy as np
+import soundfile as sf
+x, sr = sf.read(sys.argv[1], dtype="float32")
+sf.write(sys.argv[2], np.concatenate([np.zeros(sr, np.float32), x]), sr, subtype="FLOAT")
+PY
+in="$dir/in.wav"
+
+props() { printf '{ node.name=%s node.autoconnect=false }' "$1"; }
+pw-cat -r --rate 48000 --channels 1 --format f32 -P "$(props "$id-rec")" "$out" &
+rec=$!
+pids+=("$rec")
+pw-cat -p -P "$(props "$id-play")" "$in" &
+play=$!
+pids+=("$play")
+wait_port -i "$id-rec:input"
+wait_port -o "$id-play:output"
+
+link() { pw-link "$1" "$2"; }
+link "$(port -o "$id-play:output")" "$(port -i "$id.capture:input")"
+link "$(port -o "$id:capture")" "$(port -i "$id-rec:input")"
+
+wait "$play" || true
+sleep 1.5
+kill -INT "$rec" 2>/dev/null || true
+wait "$rec" 2>/dev/null || true

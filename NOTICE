@@ -1,0 +1,28 @@
+studiomic is MIT licensed (LICENSE). It builds on, downloads or links the
+following. Nothing below is copied into this repository except where stated.
+
+Linked into the plugin (pkgs/dpdfnet-ladspa), from nixpkgs
+  kissfft            BSD-3-Clause   https://github.com/mborgerding/kissfft
+  ONNX Runtime       MIT            https://github.com/microsoft/onnxruntime
+  LADSPA header      LGPL-2.1+      (header only; the plugin is MIT)
+
+Model weights, fetched at build time and pinned by hash
+  DPDFNet            Apache-2.0     https://github.com/ceva-ip/DPDFNet
+                     Rika, Sapir, Gus: "DPDFNet: Boosting DeepFilterNet2 via
+                     Dual-Path RNN", arXiv:2512.16420. The plugin follows the
+                     reference streaming code in that repository.
+  DNSMOS P.835       CC BY 4.0      https://github.com/microsoft/DNS-Challenge
+                     Microsoft. sig_bak_ovr.onnx, used by studiomic-select to
+                     score recorded speech. Attribution: Microsoft Corporation.
+
+Run at runtime, from nixpkgs, not part of this repository
+  LSP Plugins        LGPL-3.0       https://lsp-plug.in  (auto gain, de-esser,
+                                    compressor, limiter, as separate LADSPA
+                                    plugins loaded by PipeWire)
+  PipeWire, WirePlumber  MIT        https://pipewire.org
+
+Test audio, downloaded by `studiomic-bench corpus` on request, never stored here
+  LibriVox "Short Poetry Collection 266"  public domain   (voice)
+  Wikimedia Commons "Typing on Keychron V1 Ultra"  CC BY 4.0, user C40115
+  Wikimedia Commons "Air conditioner hum"  CC BY 4.0, Gravity Sound
+  Wikimedia Commons "Restaurant ambience"  public domain
