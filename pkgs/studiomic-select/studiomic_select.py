@@ -41,6 +41,10 @@ import time
 import numpy as np
 
 SR = 16000
+# The directory under $XDG_RUNTIME_DIR where the status file goes. The service
+# unit's RuntimeDirectory (nix/core.nix) must be the same name: it is the only
+# place the sandboxed service may write. A check in nix/checks.nix compares them.
+STATUS_DIR = "studiomic"
 FRAME = 320  # 20 ms
 WINDOW_S = 9.01  # the input length DNSMOS wants
 PROBE_BUFFER = int(10 * SR)
@@ -517,7 +521,7 @@ def main():
     ap.add_argument("--seconds", type=float, default=30.0, help="how long `once` measures")
     ap.add_argument("--debug", action="store_true", help="log the inputs of every decision")
     ap.add_argument("--status", default=os.path.join(
-        os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "studiomic-select", "status.json"))
+        os.environ.get("XDG_RUNTIME_DIR", "/tmp"), STATUS_DIR, "status.json"))
     a = ap.parse_args()
 
     if a.cmd == "status":

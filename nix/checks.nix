@@ -95,6 +95,16 @@ in
 
   home-manager-module = hm.config.home-files;
 
+  # The selector writes its status under $XDG_RUNTIME_DIR/STATUS_DIR; the unit
+  # may write only to its RuntimeDirectory. If the two names drift apart the
+  # selector logs "Read-only file system" every few seconds and writes nothing.
+  status-dir = pkgs.runCommand "studiomic-status-dir" { } ''
+    want=$(sed -n 's/^STATUS_DIR = "\(.*\)"$/\1/p' ${../pkgs/studiomic-select/studiomic_select.py})
+    have=$(sed -n 's/^ *RuntimeDirectory = "\(.*\)";$/\1/p' ${./core.nix})
+    [ -n "$want" ] && [ "$want" = "$have" ] || { echo "STATUS_DIR '$want' != RuntimeDirectory '$have'"; exit 1; }
+    touch $out
+  '';
+
   format = pkgs.runCommand "studiomic-format" { nativeBuildInputs = [ pkgs.nixfmt ]; } ''
     nixfmt --check ${../flake.nix} ${../nix}/*.nix ${../pkgs}/*/default.nix
     touch $out
