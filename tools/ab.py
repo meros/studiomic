@@ -145,7 +145,7 @@ def variants(conf):
     by = {n["name"]: n for n in g}
     head = [by["dpdf"], by["hpf"]]
     tail = [by[k] for k in ("gain", "comp", "limit", "ceiling")]
-    today = head + [by[k] for k in ("mud", "presence", "air") if k in by] + tail
+    today = head + [n for n in g if n["name"].startswith("eq")] + tail
     deess = {"type": "ladspa", "name": "deess", "plugin": by["comp"]["plugin"], "label": LSP + "deesser_mono",
              "control": {"High-pass filter frequency (Hz)": 4500.0, "Low-pass filter frequency (Hz)": 10000.0,
                          "Threshold (G)": 0.03, "Ratio": 4.0}}
@@ -155,8 +155,7 @@ def variants(conf):
     return {
         "raw": ("the laptop microphone, unprocessed (hidden reference)", None),
         "thin": ("hidden anchor: denoised, thin (cut below 450 Hz, +4 dB at 3 kHz)", head + thin + tail),
-        "today": ("the service as it runs now: denoise, 80 Hz high-pass, EQ -2 dB 280 Hz, +2 dB 3.5 kHz, "
-                  "+1.5 dB above 9 kHz, leveling", today),
+        "today": ("the service as it runs now: denoise, 80 Hz high-pass, the eqBands EQ, leveling", today),
         "flat": ("denoise + high-pass + leveling, no EQ", head + tail),
         "warm": ("flat + 3 dB low shelf at 180 Hz, -1.5 dB at 350 Hz, -3 dB high shelf at 6 kHz", head + warm + tail),
         # after the leveler: before it the signal is too quiet to reach the threshold

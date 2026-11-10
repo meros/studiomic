@@ -85,10 +85,10 @@ Every option is in [docs/options.md](docs/options.md). The ones people change:
 
 | Option | Default | What it does |
 |---|---|---|
-| `model` | `dpdfnet2_48khz_hr` | `dpdfnet8_48khz_hr` is the quality model: within 0.05 DNSMOS and 4 to 6 times the CPU |
+| `model` | `dpdfnet2_48khz_hr` | `dpdfnet8_48khz_hr` is the quality model: within 0.05 DNSMOS, 2.1 times the CPU on ONNX Runtime, and too slow for the real-time thread there (docs/design.md) |
 | `attenuationLimitDb` | `100` | the most the denoiser may remove; lower mixes the original back in |
 | `targetLufs` | `-23` | speech loudness after the auto gain |
-| `eq`, `dynamics` | `true` | the EQ, and auto gain + de-esser + compressor + limiter |
+| `eq`, `dynamics` | `true` | the EQ (`eqBands`, fitted to a reference), and auto gain + de-esser + compressor + limiter |
 | `autoSelect.enable` | `true` | measured microphone choice; off leaves the default source to WirePlumber |
 | `makeDefault` | `true` | make Studiomic the default microphone when the service starts |
 

@@ -37,12 +37,14 @@
       };
 
       overlays.default = final: _prev: {
+        dpdfnet-native = final.callPackage ./pkgs/dpdfnet-native { };
         dpdfnet-ladspa = final.callPackage ./pkgs/dpdfnet-ladspa { };
         studiomic-select = final.callPackage ./pkgs/studiomic-select { };
       };
 
       packages = forAllSystems (pkgs: rec {
-        dpdfnet-ladspa = pkgs.callPackage ./pkgs/dpdfnet-ladspa { };
+        dpdfnet-native = pkgs.callPackage ./pkgs/dpdfnet-native { };
+        dpdfnet-ladspa = pkgs.callPackage ./pkgs/dpdfnet-ladspa { inherit dpdfnet-native; };
         studiomic-select = pkgs.callPackage ./pkgs/studiomic-select { };
         # The PipeWire config with every option at its default.
         config = import ./nix/default-config.nix { inherit lib pkgs self; };
