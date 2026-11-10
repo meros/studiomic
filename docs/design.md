@@ -33,7 +33,7 @@ In signal order, with the reason for each position (also in `nix/chain.nix`):
 |---|---|---|
 | `dpdf` | DPDFNet, 48 kHz | First, on the raw signal. It scored lower when a high-pass came before it (DNSMOS 3.18 against 3.23 on keystrokes, 3.02 against 3.19 on chatter), and everything after it would lift the noise that is left. |
 | `hpf` | 80 Hz high-pass | Desk thumps and mains hum are below the voice. |
-| `body`, `mud`, `soft` | +3 dB low shelf 180 Hz, -1.5 dB at 350 Hz, -3 dB high shelf 6 kHz | Chosen by a blind test (below). |
+| `eq1` to `eq6` | -2.5 dB low shelf 150 Hz, +3.5 dB at 500 Hz, +2.5 dB at 2 kHz, +4 dB at 3.5 kHz, +1.5 dB at 5.5 kHz, -3 dB high shelf 9 kHz | Fitted to a reference ("Tone against a reference" below). The first EQ came from a blind test on another recording. |
 | `gain` | LSP auto gain, -23 LUFS, at most +24 dB | Before the compressor, because the compressor's threshold means something only once the level is known. Pauses below -55 LUFS count as silence and are left alone. |
 | `deess` | LSP de-esser on 4.5 to 10 kHz | After the leveler: before it, the signal is too quiet to reach the threshold. |
 | `comp` | 3:1 RMS from -18 dB | Evens out loud and soft words. |
@@ -144,6 +144,83 @@ it, headphones unknown. The matched EQ used a target spectrum recalled from a
 published average, so its loss says only that this target did not beat a fixed warm
 curve. A second round on a longer recording would tell whether `warm` alone sounds as
 good.
+
+## Tone against a reference
+
+The blind test above was one listener, one recording and one microphone. A second round used
+an offline reference instead: the same 60 s of a laptop microphone (Pro 10 input, speech,
+typing, soft and loud speech, a Swedish sentence), processed offline by DPDFNet8 and then
+Resemble Enhance (MIT, nfe 32, 401 s of CPU for 60 s of audio, so not real time). One listener
+rated it clearly best of four in a blind, loudness-matched, shuffled test; a second round
+rated the real-time chain with the fitted EQ and the quality model best of the real-time
+variants.
+
+The chain was run offline on the raw recording (`tools/chain_host.py`) and compared with the
+reference on the reference's speech frames, after matching speech level. The measure is the
+difference of the average power in third-octave bands from 100 Hz to 13 kHz. Each iteration
+moved the EQ gains by the difference; it converged in three. Result, same recording:
+
+| | tone error (RMS over 22 bands) | pause level | DNSMOS OVR |
+|---|---|---|---|
+| EQ before (180 Hz shelf, 350 Hz, 6 kHz shelf), light model | 3.5 dB | -79 dBFS | 3.07 |
+| fitted EQ, light model | 1.2 dB | -77 dBFS | 3.10 |
+| fitted EQ, quality model | 1.2 dB | -84 dBFS | 3.11 |
+| the reference | 0 | -86 dBFS | 3.39 |
+
+What did not help, each measured on the same recording:
+
+- **A gate after the auto gain** (threshold -58 to -46 dBFS, 10 or 20 dB of reduction): the
+  long silences drop by 20 dB (-99 to -119 dBFS), which nobody hears, and the pause measure
+  moves by 0.2 dB. Short gaps between words at -50 to -63 dBFS and typing between words keep
+  the gate open.
+- **A second denoiser pass** (8 then 8, or 8 then 2): tone 1.26 against 1.21 dB, DNSMOS 3.07
+  against 3.09.
+- **Lower attenuation limit** (30 dB): DNSMOS 3.13 against 3.11, pause level -68 against
+  -84 dBFS. At 15 dB the pause level is -46 dBFS.
+- **No de-esser, or a threshold of 0.02 or 0.05**: tone error 2.0, 1.44 and 1.43 dB against
+  1.21 dB with 0.03. The de-esser accounts for a large part of the match to the reference.
+- **A harmonic post-filter**: not built. The autocorrelation peak in voiced frames is 0.63 for
+  the real-time chain, 0.66 for the reference and 0.61 for the raw microphone, about 0.7 dB of
+  harmonic-to-noise ratio.
+- **Log-spectral distance** stays near 6.7 dB whatever the EQ does. The reference has sharper
+  harmonics (peaks about 2.5 dB higher), which is generative detail, so the distance is not
+  a target.
+
+Limits. One voice, one microphone, 60 s, one listener, and the EQ is global: a close
+microphone with its own proximity bass may want less cut at 150 Hz. The facit is a
+generative model's output, so the fit matches its tone, not a studio recording. DNSMOS stays
+0.3 below the reference (3.11 against 3.39); nothing tried closes that gap.
+
+CPU time per call of the plugin (thread CPU time, 60 s of audio, a loaded machine, load
+average about 12; ONNX Runtime, one thread):
+
+| model | block | p50 | p99 | max | calls over the budget |
+|---|---|---|---|---|---|
+| light | 480 (10 ms) | 31 % | 52 % | 84 % | 0 of 5989 |
+| light | 1024 (21 ms) | 22 % | 60 % | 74 % | 0 of 2796 |
+| quality | 480 (10 ms) | 57 % | 117 % | 159 % | 633 of 5989 |
+| quality | 1024 (21 ms) | 52 % | 131 % | 156 % | 124 of 2796 |
+
+The quality model overruns its budget in 4 to 11 % of the calls on ONNX Runtime at every
+quantum tried, so on ONNX Runtime it cannot run in the real-time thread.
+
+Ceva's own C runtime for the same models (W7A8: 7-bit weights, 8-bit activations, AVX2
+kernels with AVX-VNNI variants chosen at run time; `pkgs/dpdfnet-native`) runs one 10 ms hop
+per call without allocation. Same recording, same method, thread CPU time:
+
+| model and engine | block | p50 | p99 | max | calls over the budget |
+|---|---|---|---|---|---|
+| quality, native | 480 (10 ms) | 11 % | 22 % | 25 % | 0 of 5989 |
+| quality, native | 1024 (21 ms) | 10 % | 26 % | 31 % | 0 of 2796 |
+
+The output matches ONNX Runtime on the quality model: tone error 1.21 against 1.20 dB, pause
+level -83.8 against -84.3 dBFS, DNSMOS OVR 3.09 against 3.11. On the light model the native
+engine is worse in the pauses (-72 against -77 dBFS), so the plugin uses the native engine for
+the quality model only (`DPDFNET_ENGINE=native` forces it for the light one). The whole
+default chain now needs 6.4 s of CPU for 60 s of audio, against 20.8 s for the old default
+(light model on ONNX Runtime). The plugin checks the weights file against the SHA-256 in the
+model metadata before it uses it. On a CPU without AVX2 and FMA, or with a weights file that
+does not check out, it runs the light model on ONNX Runtime and says so in the log.
 
 ## Bugs the tests found
 

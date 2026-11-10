@@ -37,9 +37,11 @@
 #include <ladspa.h>
 #include <locale.h>
 #include <math.h>
+#include <dpdfnet.h>
 #include <onnxruntime_c_api.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -50,6 +52,18 @@
 
 #ifndef DPDFNET_MODEL_PATH
 #define DPDFNET_MODEL_PATH ""
+#endif
+/* Native engine: packed weights of the default model, and its size (8 or 2; 0 = none). */
+#ifndef DPDFNET_WEIGHTS_PATH
+#define DPDFNET_WEIGHTS_PATH ""
+#endif
+#ifndef DPDFNET_NATIVE_ID
+#define DPDFNET_NATIVE_ID 0
+#endif
+/* ONNX file of the light model, used instead of the quality model when the native engine is
+ * unavailable: the quality model on ONNX Runtime overruns the real-time budget. */
+#ifndef DPDFNET_LIGHT_MODEL_PATH
+#define DPDFNET_LIGHT_MODEL_PATH ""
 #endif
 
 #define PORT_IN 0
@@ -94,6 +108,9 @@ typedef struct {
     unsigned long frame_no;
     float *fifo; /* output ring, power-of-two size */
     unsigned long fifo_mask, fifo_rd, fifo_wr;
+
+    /* native engine (Ceva W7A8 C runtime); NULL when ONNX Runtime runs the model */
+    dpdfnet_model *native;
 
     /* ONNX Runtime */
     OrtSession *session;
@@ -160,6 +177,7 @@ static void destroy(Plugin *p)
 {
     if (!p)
         return;
+    dpdfnet_destroy(p->native);
     for (int i = 0; i < 2; i++)
         if (p->v_state[i])
             ort->ReleaseValue(p->v_state[i]);
@@ -200,6 +218,119 @@ static void destroy(Plugin *p)
     free(p);
 }
 
+/* SHA-256, to check the weights file against the hash in the model metadata. */
+static const uint32_t K256[64] = {
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
+#define ROR32(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
+
+static void sha256_block(uint32_t h[8], const unsigned char *b)
+{
+    uint32_t w[64], a[8];
+    for (int i = 0; i < 16; i++)
+        w[i] = (uint32_t)b[4 * i] << 24 | (uint32_t)b[4 * i + 1] << 16 | (uint32_t)b[4 * i + 2] << 8 |
+               b[4 * i + 3];
+    for (int i = 16; i < 64; i++) {
+        uint32_t s0 = ROR32(w[i - 15], 7) ^ ROR32(w[i - 15], 18) ^ (w[i - 15] >> 3);
+        uint32_t s1 = ROR32(w[i - 2], 17) ^ ROR32(w[i - 2], 19) ^ (w[i - 2] >> 10);
+        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+    memcpy(a, h, sizeof a);
+    for (int i = 0; i < 64; i++) {
+        uint32_t t1 = a[7] + (ROR32(a[4], 6) ^ ROR32(a[4], 11) ^ ROR32(a[4], 25)) +
+                      ((a[4] & a[5]) ^ (~a[4] & a[6])) + K256[i] + w[i];
+        uint32_t t2 = (ROR32(a[0], 2) ^ ROR32(a[0], 13) ^ ROR32(a[0], 22)) +
+                      ((a[0] & a[1]) ^ (a[0] & a[2]) ^ (a[1] & a[2]));
+        memmove(a + 1, a, 7 * sizeof a[0]);
+        a[4] += t1;
+        a[0] = t1 + t2;
+    }
+    for (int i = 0; i < 8; i++)
+        h[i] += a[i];
+}
+
+static void sha256_hex(const unsigned char *d, size_t len, char out[65])
+{
+    uint32_t h[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+                     0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+    size_t i = 0;
+    for (; i + 64 <= len; i += 64)
+        sha256_block(h, d + i);
+    unsigned char tail[128] = {0};
+    size_t rem = len - i;
+    memcpy(tail, d + i, rem);
+    tail[rem] = 0x80;
+    size_t tl = rem < 56 ? 64 : 128;
+    uint64_t bits = (uint64_t)len * 8;
+    for (int k = 0; k < 8; k++)
+        tail[tl - 1 - k] = (unsigned char)(bits >> (8 * k));
+    sha256_block(h, tail);
+    if (tl == 128)
+        sha256_block(h, tail + 64);
+    for (int k = 0; k < 8; k++)
+        snprintf(out + 8 * k, 9, "%08x", h[k]);
+}
+
+/* Weights file of the native engine: exactly `count` floats whose SHA-256 equals
+ * the hash in the model metadata. NULL on any mismatch. */
+static float *read_weights(const char *path, size_t count, const char *sha_hex)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return NULL;
+    float *w = malloc(count * sizeof(float));
+    int bad = !w || fread(w, sizeof(float), count, f) != count || fgetc(f) != EOF;
+    fclose(f);
+    if (!bad) {
+        char got[65];
+        sha256_hex((const unsigned char *)w, count * sizeof(float), got);
+        bad = strcmp(got, sha_hex) != 0;
+    }
+    if (bad) {
+        free(w);
+        return NULL;
+    }
+    return w;
+}
+
+/* The native engine: geometry and state from the library, weights from a file.
+ * Returns 0 and leaves the plugin ready for the common set-up, or -1. */
+static int init_native(Plugin *p, const char *wpath, int nid, unsigned long rate)
+{
+    if (!dpdfnet_cpu_supported())
+        return -1;
+    dpdfnet_model_id id = nid == 8 ? DPDFNET_MODEL_8 : DPDFNET_MODEL_2;
+    const dpdfnet_model_info *info = dpdfnet_get_model_info(id);
+    if (!info || info->abi_version != DPDFNET_ABI_VERSION || info->sample_rate != rate)
+        return -1;
+    float *w = read_weights(wpath, info->weight_floats, info->weights_sha256);
+    if (!w) {
+        fprintf(stderr, "dpdfnet_ladspa: %s: not the %s weights (size or SHA-256)\n", wpath, info->name);
+        return -1;
+    }
+    p->native = dpdfnet_create(id, w, info->weight_floats);
+    free(w);
+    if (!p->native)
+        return -1;
+    p->hop = (int)info->hop_samples;
+    p->win = 2 * p->hop;
+    p->bins = p->hop + 1;
+    p->state_len = (int)info->state_floats;
+    p->state[0] = calloc(p->state_len, sizeof(float));
+    p->state[1] = calloc(p->state_len, sizeof(float));
+    p->init_state = calloc(p->state_len, sizeof(float));
+    if (!p->state[0] || !p->state[1] || !p->init_state || dpdfnet_init_state(id, p->state[0]))
+        return -1;
+    memcpy(p->init_state, p->state[0], (size_t)p->state_len * sizeof(float));
+    return 0;
+}
+
 static LADSPA_Handle instantiate(const LADSPA_Descriptor *d, unsigned long rate)
 {
     (void)d;
@@ -209,9 +340,40 @@ static LADSPA_Handle instantiate(const LADSPA_Descriptor *d, unsigned long rate)
     p->rate = rate;
     p->debug = getenv("DPDFNET_DEBUG") != NULL;
 
+    /* Engine: DPDFNET_ENGINE = auto (default), onnx or native. Auto uses the native
+     * engine for the quality model (8) when the CPU has AVX2 and FMA and the weights
+     * check out. Otherwise the light model runs on ONNX Runtime (the quality model there
+     * overruns the real-time budget; DPDFNET_ENGINE=onnx keeps it). native also takes the light model (2),
+     * which measured worse in the pauses than ONNX Runtime on the same model. */
+    const char *eng = getenv("DPDFNET_ENGINE");
+    int force_native = eng && !strcmp(eng, "native");
+    int use_light = 0;
+    if (!(eng && !strcmp(eng, "onnx"))) {
+        const char *wpath = getenv("DPDFNET_WEIGHTS");
+        if (!wpath || !*wpath)
+            wpath = DPDFNET_WEIGHTS_PATH;
+        const char *mid = getenv("DPDFNET_NATIVE_MODEL");
+        int nid = mid && *mid ? atoi(mid) : DPDFNET_NATIVE_ID;
+        if (*wpath && (nid == 8 || (force_native && nid == 2))) {
+            if (init_native(p, wpath, nid, rate) == 0)
+                goto common;
+            if (force_native)
+                goto fail;
+            use_light = nid == 8 && *DPDFNET_LIGHT_MODEL_PATH;
+            fprintf(stderr, "dpdfnet_ladspa: native engine unavailable, using %s on ONNX Runtime\n",
+                    use_light ? "the light model" : "the model");
+            dpdfnet_destroy(p->native);
+            p->native = NULL;
+            free(p->state[0]);
+            free(p->state[1]);
+            free(p->init_state);
+            p->state[0] = p->state[1] = p->init_state = NULL;
+        }
+    }
+
     const char *path = getenv("DPDFNET_MODEL");
     if (!path || !*path)
-        path = DPDFNET_MODEL_PATH;
+        path = use_light ? DPDFNET_LIGHT_MODEL_PATH : DPDFNET_MODEL_PATH;
     if (!*path) {
         fprintf(stderr, "dpdfnet_ladspa: no model path (set DPDFNET_MODEL)\n");
         goto fail;
@@ -313,6 +475,7 @@ static LADSPA_Handle instantiate(const LADSPA_Descriptor *d, unsigned long rate)
     if (!ok)
         goto fail;
 
+common:
     /* Vorbis window, as in the reference */
     p->window = malloc(p->win * sizeof(float));
     for (int i = 0; i < p->win; i++) {
@@ -348,6 +511,19 @@ static LADSPA_Handle instantiate(const LADSPA_Descriptor *d, unsigned long rate)
     p->inv = kiss_fftr_alloc(p->win, 1, NULL, NULL);
     if (!p->fwd || !p->inv)
         goto fail;
+
+    if (p->native) {
+        /* touch the weights and code paths now, outside the audio thread */
+        for (int i = 0; i < 2; i++) {
+            if (dpdfnet_process(p->native, p->spec_in, p->state[p->cur], p->spec_out, p->state[p->cur ^ 1]))
+                goto fail;
+            p->cur ^= 1;
+        }
+        memcpy(p->state[0], p->init_state, (size_t)p->state_len * sizeof(float));
+        p->cur = 0;
+        memset(p->spec_in, 0, (size_t)p->bins * 2 * sizeof(float));
+        return p;
+    }
 
     /* tensors over our own buffers; no allocation per frame */
     if (check(ort->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault, &p->meminfo),
@@ -419,22 +595,30 @@ static int run_frame(Plugin *p, float atten_lin)
     memcpy(p->hist + (size_t)(p->frame_no % (LOOKAHEAD + 1)) * p->bins * 2, p->spec_in,
            (size_t)p->bins * 2 * sizeof(float));
 
-    const char *in_names[2] = {p->name_spec_in, p->name_state_in};
-    const char *out_names[2] = {p->name_spec_out, p->name_state_out};
-    const OrtValue *ins[2] = {p->v_spec_in, p->v_state[p->cur]};
-    OrtValue *outs[2] = {p->v_spec_out, p->v_state[p->cur ^ 1]};
     double t0 = 0, w0 = 0;
     if (p->debug) {
         t0 = clock_ms(CLOCK_THREAD_CPUTIME_ID);
         w0 = clock_ms(CLOCK_MONOTONIC);
     }
-    OrtStatus *st = ort->Run(p->session, NULL, in_names, ins, 2, out_names, 2, outs);
-    if (st) {
-        if (p->logged++ < 5)
-            check(st, "Run");
-        else
-            ort->ReleaseStatus(st);
-        return -1;
+    if (p->native) {
+        if (dpdfnet_process(p->native, p->spec_in, p->state[p->cur], p->spec_out, p->state[p->cur ^ 1])) {
+            if (p->logged++ < 5)
+                fprintf(stderr, "dpdfnet_ladspa: native process failed\n");
+            return -1;
+        }
+    } else {
+        const char *in_names[2] = {p->name_spec_in, p->name_state_in};
+        const char *out_names[2] = {p->name_spec_out, p->name_state_out};
+        const OrtValue *ins[2] = {p->v_spec_in, p->v_state[p->cur]};
+        OrtValue *outs[2] = {p->v_spec_out, p->v_state[p->cur ^ 1]};
+        OrtStatus *st = ort->Run(p->session, NULL, in_names, ins, 2, out_names, 2, outs);
+        if (st) {
+            if (p->logged++ < 5)
+                check(st, "Run");
+            else
+                ort->ReleaseStatus(st);
+            return -1;
+        }
     }
     if (p->debug && p->ntimes < p->times_cap) {
         p->times[p->ntimes] = clock_ms(CLOCK_THREAD_CPUTIME_ID) - t0;

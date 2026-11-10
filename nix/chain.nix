@@ -19,12 +19,17 @@
 #             the chatter clip), and everything after it (EQ gain, auto gain)
 #             would lift the noise that is still there.
 #   hpf       80 Hz high-pass: desk thumps and mains hum are below the voice.
-#   body, mud, soft
-#             The EQ, chosen by a blind listening test of 7 variants on a
-#             recording of a laptop microphone (docs/design.md): +3 dB low
-#             shelf at 180 Hz for body, -1.5 dB at 350 Hz against mud, and
-#             -3 dB high shelf at 6 kHz. The first version brightened the voice
-#             (+2 dB at 3.5 kHz, +1.5 dB air) and sounded tinny.
+#   eq1 .. eqN
+#             The EQ (option eqBands). The default is fitted to a reference:
+#             the chain's output was matched, third-octave band by band, to an
+#             offline DPDFNet8 + Resemble Enhance rendering that a listener rated
+#             best (docs/design.md, "Tone against a reference"). It cuts the
+#             low end (-2.5 dB shelf at 150 Hz), lifts the presence (+3.5 dB at
+#             500 Hz, +2.5 dB at 2 kHz, +4 dB at 3.5 kHz, +1.5 dB at 5.5 kHz) and
+#             trims the air (-3 dB shelf at 9 kHz). The earlier EQ (+3 dB shelf
+#             at 180 Hz, -1.5 dB at 350 Hz, -3 dB shelf at 6 kHz) came from a
+#             blind test on another recording and scored 3.4 dB RMS away from
+#             the reference where this one scores 1.2 dB.
 #   gain      LSP auto gain: moves the level of speech toward targetLufs and
 #             leaves pauses alone (anything under -55 LUFS counts as silence),
 #             so a quiet mic and a loud mic end up at the same level. It comes
@@ -59,11 +64,9 @@ let
     }
     (bq "hpf" "bq_highpass" 80.0 0.707 null)
   ]
-  ++ lib.optionals cfg.eq [
-    (bq "body" "bq_lowshelf" 180.0 0.7 3.0)
-    (bq "mud" "bq_peaking" 350.0 1.0 (-1.5))
-    (bq "soft" "bq_highshelf" 6000.0 0.7 (-3.0))
-  ]
+  ++ lib.optionals cfg.eq (
+    lib.imap1 (i: b: bq "eq${toString i}" "bq_${b.type}" b.freq b.q b.gain) cfg.eqBands
+  )
   ++ lib.optionals cfg.dynamics [
     {
       type = "ladspa";

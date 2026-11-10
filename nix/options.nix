@@ -39,11 +39,18 @@ in
 
   model = lib.mkOption {
     type = lib.types.enum (builtins.attrNames packages.dpdfnet-ladspa.models);
-    default = "dpdfnet2_48khz_hr";
+    default = "dpdfnet8_48khz_hr";
     description = ''
       DPDFNet model. The light one scored within 0.05 DNSMOS of the quality one
-      on the keyboard, fan and chatter test and uses about a sixth of the CPU;
-      the quality one is slower than real time on a loaded machine.
+      on the keyboard, fan and chatter test. On ONNX Runtime the quality one costs
+      2.1 times the CPU (31.8 s against 14.8 s per 60 s of audio, Lunar Lake laptop,
+      one core). That is 53 % of a core on average, and single calls take longer than
+      the 10 ms hop in about 1 call in 20 (thread CPU time, quantum 480), so it can
+      overrun inside the real-time thread. The light model never did (maximum 84 %
+      of the budget). The quality model therefore runs on Ceva's native engine (about a
+      fifth of that CPU), which needs AVX2 and FMA. Without them, or when the weights
+      file does not check out, the plugin runs the light model instead and says so in
+      the PipeWire client's log.
     '';
   };
 
@@ -72,7 +79,80 @@ in
   eq = lib.mkOption {
     type = lib.types.bool;
     default = true;
-    description = "Voice EQ: body below 200 Hz, less 350 Hz mud, softer highs (docs/design.md).";
+    description = "Voice EQ after the high-pass (the bands in `eqBands`).";
+  };
+
+  eqBands = lib.mkOption {
+    type = lib.types.listOf (
+      lib.types.submodule {
+        options = {
+          type = lib.mkOption {
+            type = lib.types.enum [
+              "lowshelf"
+              "peaking"
+              "highshelf"
+            ];
+            description = "Filter shape (RBJ audio-EQ cookbook biquad).";
+          };
+          freq = lib.mkOption {
+            type = lib.types.numbers.between 20 20000;
+            description = "Centre or corner frequency in Hz.";
+          };
+          q = lib.mkOption {
+            type = lib.types.numbers.positive;
+            description = "Quality factor.";
+          };
+          gain = lib.mkOption {
+            type = lib.types.numbers.between (-24) 24;
+            description = "Gain in dB.";
+          };
+        };
+      }
+    );
+    default = [
+      {
+        type = "lowshelf";
+        freq = 150.0;
+        q = 0.7;
+        gain = -2.5;
+      }
+      {
+        type = "peaking";
+        freq = 500.0;
+        q = 1.0;
+        gain = 3.5;
+      }
+      {
+        type = "peaking";
+        freq = 2000.0;
+        q = 1.0;
+        gain = 2.5;
+      }
+      {
+        type = "peaking";
+        freq = 3500.0;
+        q = 1.0;
+        gain = 4.0;
+      }
+      {
+        type = "peaking";
+        freq = 5500.0;
+        q = 1.0;
+        gain = 1.5;
+      }
+      {
+        type = "highshelf";
+        freq = 9000.0;
+        q = 0.7;
+        gain = -3.0;
+      }
+    ];
+    description = ''
+      The EQ bands, applied in order when `eq` is on. The default is fitted, third-octave
+      band by band, to an offline reference that a listener rated best (docs/design.md).
+      It was fitted on one voice and one microphone, so a close microphone that already
+      has proximity bass may want a smaller cut at 150 Hz.
+    '';
   };
 
   dynamics = lib.mkOption {
