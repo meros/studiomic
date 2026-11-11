@@ -83,6 +83,17 @@ def switching():
                vms.hearing({"near": mk(30, 0.6), "dead": mk(0, 0.0, alive=False)}) == (True, set())))
     ok.append(("a quiet talker (below 12 dB on every microphone) scores nothing",
                vms.hearing({"a": mk(9, 0.3), "b": mk(4, 0.1)}) == (False, set())))
+    node = lambda i, name: {"id": i, "type": "PipeWire:Interface:Node", "info": {"props": {"node.name": name}}}
+    link = lambda i, out, inp: {"id": i, "type": "PipeWire:Interface:Link",
+                                "info": {"output-node-id": out, "input-node-id": inp}}
+    graph = [node(1, "voice_clean"), node(2, "voice_clean.capture"), node(3, "teams"), node(4, "mic")]
+    ok.append(("nobody reads the voice filter: not in use",
+               not vms.in_use(graph + [link(10, 4, 2)], "voice_clean")))
+    ok.append(("the filter's own input link is not a reader",
+               not vms.in_use(graph + [link(10, 4, 2), link(11, 2, 2)], "voice_clean")))
+    ok.append(("an application linked to the filter's output is a reader",
+               vms.in_use(graph + [link(10, 4, 2), link(11, 1, 3)], "voice_clean")))
+    ok.append(("a graph without the filter is not in use", not vms.in_use([node(4, "mic")], "voice_clean")))
     c = fresh({"a": 3.0, "b": 3.4}, current="a")
     c.update("b", None)
     ok.append(("a window without a score changes nothing", c.score["b"] == 3.4 and c.evals["b"] == 3))

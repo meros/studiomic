@@ -73,6 +73,10 @@ code. It matches an independent numpy implementation to within 0.1 dB on the sco
 ## Choosing the microphone
 
 `studiomic-select` opens every candidate at once, so all hear the same speech.
+With `--on-demand` (the module default) it opens them only while an application
+reads the voice filter's output (a link from that node exists), and closes them
+15 s after the last reader leaves, because opening a Bluetooth headset's
+microphone switches the headset from A2DP to HFP.
 
 - **Liveness.** A source that delivers exact zeros or one bit of flicker over the
   last 1.5 s is dead (muted, unplugged).

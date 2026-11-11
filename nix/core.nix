@@ -110,18 +110,21 @@ let
       partOf = [ "studiomic.service" ];
       unit.StartLimitIntervalSec = 0;
       service = sandbox // {
-        ExecStart = lib.escapeShellArgs [
-          "${selector}/bin/studiomic-select"
-          "run"
-          "--chain"
-          "${cfg.nodeName}.capture"
-          "--pattern"
-          cfg.autoSelect.pattern
-          "--dwell"
-          (toString cfg.autoSelect.dwellSeconds)
-          "--interval"
-          (toString cfg.autoSelect.intervalSeconds)
-        ];
+        ExecStart = lib.escapeShellArgs (
+          [
+            "${selector}/bin/studiomic-select"
+            "run"
+            "--chain"
+            "${cfg.nodeName}.capture"
+            "--pattern"
+            cfg.autoSelect.pattern
+            "--dwell"
+            (toString cfg.autoSelect.dwellSeconds)
+            "--interval"
+            (toString cfg.autoSelect.intervalSeconds)
+          ]
+          ++ lib.optional cfg.autoSelect.onDemand "--on-demand"
+        );
         Restart = "always";
         RestartSec = 2;
         # It writes its status file to $XDG_RUNTIME_DIR/studiomic.

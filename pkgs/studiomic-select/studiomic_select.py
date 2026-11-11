@@ -24,9 +24,11 @@ Scores only change while somebody speaks; in a quiet room the choice stays.
 
 Privacy: audio stays in memory (9 s per microphone) and is never written.
 Side effect: every candidate microphone is open while this runs, so a desktop
-may show the microphone as in use. A Bluetooth headset only counts when it
-already has a microphone node, which exists only in its call profile, so
-probing never switches a headset out of music mode.
+may show the microphone as in use. Opening the microphone of a Bluetooth headset
+makes WirePlumber switch it from music (A2DP) to call (HFP) quality, so with
+--on-demand the daemon opens nothing until an application reads the voice
+filter's output, and closes every microphone again 15 s after the last reader
+leaves. The headset then stays in music mode whenever no call is on.
 """
 import argparse
 import json
@@ -48,6 +50,8 @@ STATUS_DIR = "studiomic"
 FRAME = 320  # 20 ms
 WINDOW_S = 9.01  # the input length DNSMOS wants
 PROBE_BUFFER = int(10 * SR)
+IDLE_GRACE_S = 15.0  # --on-demand: how long the microphones stay open after the last reader
+IDLE_POLL_S = 2.0    # --on-demand: how often to look for a reader while nothing is open
 
 
 # ---------------------------------------------------------------- scoring
@@ -190,6 +194,15 @@ def candidates(objs, pattern):
                 "description": p.get("node.description", p["node.name"]),
             }
     return out
+
+
+def in_use(objs, source):
+    """Does any client read the node called source (the voice filter's output)?"""
+    ids = {o["id"] for o in objs
+           if o.get("type") == "PipeWire:Interface:Node"
+           and o.get("info", {}).get("props", {}).get("node.name") == source}
+    return any(o.get("type") == "PipeWire:Interface:Link"
+               and o.get("info", {}).get("output-node-id") in ids for o in objs)
 
 
 class Probe(threading.Thread):
@@ -363,6 +376,18 @@ class Daemon:
         self.stats = {}
         self.stop = False
 
+    def release(self):
+        """Close every microphone. The scores and the choice stay, so the next
+        call starts from what was learned, not from the ladder."""
+        for n in list(self.probes):
+            self.probes.pop(n).stop()
+        self.chooser.alive.clear()
+        self.chooser.judged.clear()
+        self.stats = {}
+        self.scored_at = {}
+        self.deaf = {}
+        self.prev_logged = None
+
     def sync_probes(self, cands):
         for n in list(self.probes):
             if n not in cands:
@@ -444,14 +469,35 @@ class Daemon:
         last_eval = 0.0
         last_disc = -1e9
         cands = {}
+        last_used = -1e9  # --on-demand: nobody has read the filter yet
+        idle = False
         while not self.stop and (seconds is None or time.monotonic() - t0 < seconds):
             try:
                 now = time.monotonic()
                 relink = False
+                if idle:
+                    # Nothing reads the voice filter: look, and open nothing.
+                    time.sleep(IDLE_POLL_S)
+                    objs = dump()
+                    if objs is not None and in_use(objs, self.a.source):
+                        idle = False
+                        last_used = time.monotonic()
+                        last_disc = -1e9
+                        log("in use: opening the microphones")
+                    continue
                 if now - last_disc >= 3:
                     last_disc = now
                     objs = dump()
                     if objs is not None:  # a failed dump keeps what is known
+                        if self.a.on_demand:
+                            if in_use(objs, self.a.source):
+                                last_used = now
+                            elif now - last_used >= IDLE_GRACE_S:
+                                self.release()
+                                self.write_status({})
+                                idle = True
+                                log("not in use: microphones closed")
+                                continue
                         cands = candidates(objs, self.a.pattern)
                         self.sync_probes(cands)
                         relink = True  # also restores the link after a restart
@@ -515,6 +561,10 @@ def main():
                     help="regular expression of the node names that may be chosen")
     ap.add_argument("--chain", default="studiomic.capture",
                     help="node whose input follows the chosen microphone")
+    ap.add_argument("--on-demand", action="store_true",
+                    help="open no microphone until an application reads the voice filter's output")
+    ap.add_argument("--source", default=None,
+                    help="the voice filter's output node (default: --chain without its .capture)")
     ap.add_argument("--interval", type=float, default=5.0, help="seconds between measurements")
     ap.add_argument("--dwell", type=float, default=Chooser.MIN_DWELL,
                     help="least seconds between two switches")
@@ -523,6 +573,8 @@ def main():
     ap.add_argument("--status", default=os.path.join(
         os.environ.get("XDG_RUNTIME_DIR", "/tmp"), STATUS_DIR, "status.json"))
     a = ap.parse_args()
+    if a.source is None:
+        a.source = a.chain.removesuffix(".capture")
 
     if a.cmd == "status":
         print(open(a.status).read())

@@ -140,6 +140,34 @@ positive integer, meaning >0
 
 
 
+## services\.studiomic\.autoSelect\.onDemand
+
+
+
+Open no microphone until an application reads the voice filter’s output
+(a call, a recorder), and close every microphone again 15 s after the
+last reader leaves\. Opening the microphone of a Bluetooth headset makes
+WirePlumber switch the headset from music (A2DP) to call (HFP) quality,
+so without this the headset drops to call quality for as long as the
+selector runs, call or no call\. The first seconds of a call take the
+choice from the last call, or the ladder\. Off: every candidate is open
+all the time\.
+
+
+
+*Type:*
+boolean
+
+
+
+*Default:*
+
+```nix
+true
+```
+
+
+
 ## services\.studiomic\.autoSelect\.pattern
 
 

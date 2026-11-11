@@ -90,6 +90,7 @@ Every option is in [docs/options.md](docs/options.md). The ones people change:
 | `targetLufs` | `-23` | speech loudness after the auto gain |
 | `eq`, `dynamics` | `true` | the EQ (`eqBands`, fitted to a reference), and auto gain + de-esser + compressor + limiter |
 | `autoSelect.enable` | `true` | measured microphone choice; off leaves the default source to WirePlumber |
+| `autoSelect.onDemand` | `true` | open no microphone until an application reads the voice filter; a Bluetooth headset then stays in music quality outside calls |
 | `makeDefault` | `true` | make Studiomic the default microphone when the service starts |
 
 ## Measured
@@ -122,10 +123,10 @@ test that found each limit are in [docs/design.md](docs/design.md).
 - **Real-time safety is not proven.** The model runs in PipeWire's real-time
   thread. A frame costs up to 5 ms of a 10 ms budget, so a client that forces a
   quantum under 512 samples makes the graph xrun. The config asks for 1024.
-- **Every candidate microphone is open while `studiomic-select` runs**, so a desktop
-  may show the microphone as in use. Audio stays in memory (9 s per microphone).
-- **No echo cancellation** for speakers yet, and no Bluetooth headset testing: whether
-  a probe on a call-profile headset stops it returning to music mode is not checked.
+- **Every candidate microphone is open while an application reads Studiomic**, so a desktop
+  may show the microphone as in use (all the time with `autoSelect.onDemand = false`). Audio stays in memory (9 s per microphone).
+- **No echo cancellation** for speakers yet, and Bluetooth headsets: opening the headset's microphone switches it to call quality
+  (HFP), so `autoSelect.onDemand` keeps it closed outside calls. Seen on one WH-1000XM6.
 - **A mic that never pauses keeps the choice.** The selector switches between phrases.
 - **Not a studio microphone.** Research found no real-time method that turns a thin
   laptop microphone into a studio one on this kind of hardware ([docs/research.md](docs/research.md)).
